@@ -15,10 +15,11 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { AuthContext } from '../context/AuthContext';
+import client from '../api/client';
 
 export default function LoginScreen({ navigation, route }) {
     const insets = useSafeAreaInsets();
-    const { updateUserInfo, completeOnboarding } = useContext(AuthContext);
+    const { login, completeOnboarding } = useContext(AuthContext);
     const rawSelectedRole = String(route?.params?.selectedRole || 'worker').toLowerCase();
     const selectedRole = ['worker', 'employer', 'hybrid'].includes(rawSelectedRole) ? rawSelectedRole : 'worker';
     const resolvedActiveRole = selectedRole === 'employer' ? 'employer' : 'worker';
@@ -49,24 +50,41 @@ export default function LoginScreen({ navigation, route }) {
         if (loading || !canSubmit) return;
         setLoading(true);
         try {
-            await new Promise((resolve) => setTimeout(resolve, 420));
-            await updateUserInfo({
-                accountMode: selectedRole === 'hybrid' ? 'hybrid' : resolvedActiveRole,
-                role: resolvedActiveRole === 'employer' ? 'recruiter' : 'candidate',
-                activeRole: resolvedActiveRole,
-                primaryRole: resolvedActiveRole,
-                roles: resolvedRoles,
-                hasSelectedRole: true,
-                hasCompletedProfile: false,
-                hasCompletedOnboarding: true,
-            });
+            const payload = authMode === 'phone' ? { phoneNumber, password } : { email, password };
+            const { data } = await client.post('/api/users/login', payload);
+
+            if (data?.requiresOtpVerification) {
+                navigation.navigate('OTPVerification', {
+                    intent: 'login',
+                    identity: { kind: authMode, value: authMode === 'phone' ? phoneNumber : email }
+                });
+                return;
+            }
+
+            login(data);
             await completeOnboarding?.();
-        } catch (_error) {
-            Alert.alert('Sign in unavailable', 'Unable to continue right now. Please try again.');
+        } catch (error) {
+            // client.js interceptor wraps 403s into a custom ApiClientError, stripping .response.
+            // We must read status and OTP flag from both the custom error shape and the raw Axios shape.
+            const status = error?.status || error?.response?.status;
+            const otpRequired =
+                error?.originalError?.response?.data?.requiresOtpVerification
+                || error?.response?.data?.requiresOtpVerification;
+
+            if (status === 403 && otpRequired) {
+                navigation.navigate('OTPVerification', {
+                    intent: 'login',
+                    identity: { kind: authMode, value: authMode === 'phone' ? phoneNumber : email }
+                });
+                return;
+            }
+
+            const msg = error?.message || error?.response?.data?.message || 'Unable to continue right now. Please try again.';
+            Alert.alert('Sign in unavailable', msg);
         } finally {
             setLoading(false);
         }
-    }, [canSubmit, completeOnboarding, loading, resolvedActiveRole, resolvedRoles, updateUserInfo]);
+    }, [authMode, canSubmit, completeOnboarding, email, login, navigation, password, phoneNumber]);
 
     const openForgotPassword = useCallback(() => {
         navigation.navigate('ForgotPassword', { selectedRole });
